@@ -24,16 +24,16 @@ async function preprocessImage(imageUrl) {
     }
 }
 
-// Maps MapleStory jobs/advancements to your exact Discord role names
+// Fixed Maps MapleStory jobs/advancements to exact Discord role names
 function detectJobRoleName(text) {
     const lower = text.toLowerCase();
 
-    // Check Cleric first so it doesn't get grouped under Mage
+    // Check specific job lines first to prevent false overlaps
+    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
     if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
-    if (/\b(magician|wizard|mage|f\/p|i\/l|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return 'Mage';
+    if (/\b(magician|wizard|mage|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return 'Mage';
     if (/\b(warrior|fighter|page|spearman|crusader|white knight|dragon knight|hero|paladin|dark knight)\b/.test(lower)) return 'Warrior';
     if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return 'Bowman';
-    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
 
     return null; // Beginner or unrecognized job
 }
@@ -122,7 +122,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
-    // Check ClassicRank profile & job (Primary Security Check)
+    // Check ClassicRank profile & job
     const trackerData = await getClassicRankData(rawIgn);
     if (!trackerData.exists) {
         return interaction.editReply(
@@ -135,7 +135,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    // Run OCR just to check for class/job info, bypassing strict name text matching
     const ocrResult = await verifyScreenshot(attachment.url);
 
     // Use ClassicRank's detected job first, or fall back to whatever job was read from the screenshot
@@ -153,7 +152,7 @@ client.on('interactionCreate', async interaction => {
             await member.roles.add(process.env.VERIFIED_ROLE_ID);
         }
 
-        // 3. Find and assign the matching Job Role (Cleric, Warrior, Mage, Bowman, Rogue)
+        // 3. Find and assign the matching Job Role
         let assignedJobText = 'None detected (Beginner)';
         if (detectedRoleName) {
             const jobRole = guild.roles.cache.find(r => r.name.toLowerCase() === detectedRoleName.toLowerCase());
