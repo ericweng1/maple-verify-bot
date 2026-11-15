@@ -115,15 +115,12 @@ client.on('interactionCreate', async interaction => {
 
     const member = interaction.member;
 
-    // Define forbidden roles (You can add specific Role IDs or set BLOCKED_ROLE_IDS in Render environment variables)
-    // Example format for env variable: process.env.BLOCKED_ROLE_IDS ? process.env.BLOCKED_ROLE_IDS.split(',') : []
-    const blockedRoleIds = process.env.BLOCKED_ROLE_IDS ? process.env.BLOCKED_ROLE_IDS.split(',').map(id => id.trim()) : [];
+    // Check if the user already has a job role assigned
+    const jobRoleNames = ['cleric', 'mage', 'warrior', 'bowman', 'rogue'];
+    const alreadyHasJob = member.roles.cache.some(r => jobRoleNames.includes(r.name.toLowerCase()));
 
-    // Check if user has any of the restricted roles
-    const hasRestrictedRole = blockedRoleIds.some(roleId => member.roles.cache.has(roleId));
-
-    if (hasRestrictedRole) {
-        return interaction.editReply('❌ You possess a role that prevents you from using the verification command.');
+    if (alreadyHasJob) {
+        return interaction.editReply('❌ You are already verified and already possess a class role!');
     }
 
     const rawIgn = interaction.options.getString('character').trim();
@@ -164,7 +161,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // Use ClassicRank's verified job class
-    const detectedRoleName = trackerData.jobRole || screenshotJob;
+    const detectedRoleName = trackerData.jobRole;
 
     try {
         const guild = interaction.guild;
