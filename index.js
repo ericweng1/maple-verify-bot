@@ -1,32 +1,45 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes } = require('discord.js');
 const Tesseract = require('tesseract.js');
-const http = require('http');
-
-// Added dependency for image preprocessing
 const Jimp = require('jimp');
+const http = require('http');
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// In-memory store
 const claimedCharacters = new Map();
 
-// --- NEW PREPROCESSING FUNCTION ---
-// Makes the image greyscale and high-contrast to make the font clearer
+// Improved image preprocessing for game fonts
 async function preprocessImage(imageUrl) {
     try {
         const image = await Jimp.read(imageUrl);
-        image.greyscale().contrast(0.6).invert(); // Convert to high-contrast B&W
+        // Scale up 2x, convert to greyscale, normalize, and boost contrast
+        image.scale(2)
+             .greyscale()
+             .normalize()
+             .contrast(0.4);
         return await image.getBufferAsync(Jimp.MIME_PNG);
     } catch (error) {
         console.error('Image processing error:', error);
         return null;
     }
 }
-// -----------------------------------
 
-// 1. Fetch ClassicRank data
+// Maps MapleStory jobs/advancements to your exact Discord role names
+function detectJobRoleName(text) {
+    const lower = text.toLowerCase();
+
+    // Check Cleric first so it doesn't get grouped under Mage
+    if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
+    if (/\b(magician|wizard|mage|f\/p|i\/l|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return 'Mage';
+    if (/\b(warrior|fighter|page|spearman|crusader|white knight|dragon knight|hero|paladin|dark knight)\b/.test(lower)) return 'Warrior';
+    if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return 'Bowman';
+    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
+
+    return null; // Beginner or unrecognized job
+}
+
+// 1. Fetch ClassicRank page and extract the character's job class
 async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
@@ -37,7 +50,7 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        // Clean HTML to read text (e.g., "Lv. 40 · Assassin")
+        // Strip HTML tags to read the visible profile text
         const cleanText = html.replace(/<[^>]*>/g, ' ');
         const jobRole = detectJobRoleName(cleanText);
 
@@ -48,13 +61,11 @@ async function getClassicRankData(characterName) {
     }
 }
 
-// 2. Read text from preprocessed screenshot
+// 2. Read text from the preprocessed screenshot using Tesseract OCR
 async function verifyScreenshot(imageUrl, targetIgn) {
     try {
-        // Preprocess the image first!
         const processedImageBuffer = await preprocessImage(imageUrl);
         if (!processedImageBuffer) {
-            console.error('Preprocessing failed.');
             return { hasIgn: false, screenshotJobRole: null };
         }
 
@@ -66,17 +77,6 @@ async function verifyScreenshot(imageUrl, targetIgn) {
         console.error('OCR Error:', error);
         return { hasIgn: false, screenshotJobRole: null };
     }
-}
-
-// Map jobs to Discord roles
-function detectJobRoleName(text) {
-    const lower = text.toLowerCase();
-    if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
-    if (/\b(magician|wizard|mage|f\/p|i\/l|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return 'Mage';
-    if (/\b(warrior|fighter|page|spearman|crusader|white knight|dragon knight|hero|paladin|dark knight)\b/.test(lower)) return 'Warrior';
-    if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return 'Bowman';
-    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
-    return null;
 }
 
 client.once('ready', async () => {
@@ -121,14 +121,15 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (claimedCharacters.has(ignKey) && claimedCharacters.get(ignKey) !== interaction.user.id) {
-        return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member.`);
+        return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
+    // Check ClassicRank profile & job
     const trackerData = await getClassicRankData(rawIgn);
     if (!trackerData.exists) {
         return interaction.editReply(
-            `❌ Could not find **${rawIgn}** on ClassicRank.\n` +
-            `*Make sure your character is public on classicrank.com/user/${rawIgn}*`
+            `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
+            `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
         );
     }
 
@@ -136,29 +137,31 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    // Pass original image URL; the function will preprocess it
+    // Run OCR on preprocessed screenshot
     const ocrResult = await verifyScreenshot(attachment.url, rawIgn);
-    
-    // Check ClassicRank's job first, fallback to OCR. That screenshot lists "Assassin", which maps to "Rogue".
-    const detectedRoleName = trackerData.jobRole || ocrResult.screenshotJobRole;
-
     if (!ocrResult.hasIgn) {
         return interaction.editReply(
             `❌ **Screenshot Check Failed:** Could not read **"${rawIgn}"** in your screenshot.\n` +
-            `*Tip: Try turning off any in-game transparency effects or post-processing.*`
+            `*Tip: Double-click your character in-game so your Character Info box (Name/Level/Job) is clearly visible.*`
         );
     }
+
+    // Use ClassicRank's detected job first, or fall back to whatever job was read from the screenshot
+    const detectedRoleName = trackerData.jobRole || ocrResult.screenshotJobRole;
 
     try {
         const member = interaction.member;
         const guild = interaction.guild;
-        
+
+        // 1. Lock nickname
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
-        
+
+        // 2. Add base Verified role (if configured in Render)
         if (process.env.VERIFIED_ROLE_ID) {
             await member.roles.add(process.env.VERIFIED_ROLE_ID);
         }
 
+        // 3. Find and assign the matching Job Role (Cleric, Warrior, Mage, Bowman, Rogue)
         let assignedJobText = 'None detected (Beginner)';
         if (detectedRoleName) {
             const jobRole = guild.roles.cache.find(r => r.name.toLowerCase() === detectedRoleName.toLowerCase());
@@ -172,23 +175,30 @@ client.on('interactionCreate', async interaction => {
 
         const embed = new EmbedBuilder()
             .setTitle('✅ Character Verified!')
-            .setDescription(`Welcome, **${rawIgn}**!\n• **Class Role:** ${assignedJobText}`)
+            .setDescription(
+                `Welcome, **${rawIgn}**!\n` +
+                `• **Nickname:** Locked to \`${rawIgn}\`\n` +
+                `• **Class Role:** ${assignedJobText}`
+            )
             .setColor(0x00FF00);
 
         await interaction.editReply({ embeds: [embed] });
     } catch (error) {
-        console.error('Permission Error:', error);
-        await interaction.editReply('❌ Verification passed, but I failed to set your role/nickname. Check role hierarchy.');
+        console.error('Permission/Hierarchy Error:', error);
+        await interaction.editReply('❌ Verification passed, but I lacked permission to set your nickname or role. Make sure the bot\'s role is dragged **above** Cleric, Warrior, Mage, Bowman, and Rogue in Server Settings.');
     }
 });
 
 client.login(process.env.DISCORD_TOKEN);
 
+// Keep-alive HTTP server required for Render's Free Web Service
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('MapleStory Classic Verification Bot is online!\n');
 });
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🌐 Web server listening on port ${PORT}`);
 });
+```[cite: 1]
