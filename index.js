@@ -9,8 +9,8 @@ const client = new Client({
 
 const claimedCharacters = new Map();
 
-// Improved image preprocessing for game fonts
-async function preprocessImage(imageUrl) {
+// Preprocess full screenshot for reading JOB / LEVEL
+async function preprocessFullImage(imageUrl) {
     try {
         const image = await Jimp.read(imageUrl);
         image.scale(2)
@@ -19,7 +19,27 @@ async function preprocessImage(imageUrl) {
              .contrast(0.4);
         return await image.getBufferAsync(Jimp.MIME_PNG);
     } catch (error) {
-        console.error('Image processing error:', error);
+        console.error('Full image processing error:', error);
+        return null;
+    }
+}
+
+// Preprocess cropped left-side nameplate box (white text on dark pill) for IGN check
+async function preprocessNameArea(imageUrl) {
+    try {
+        const image = await Jimp.read(imageUrl);
+        const w = image.bitmap.width;
+        const h = image.bitmap.height;
+
+        // Crop the left ~42% width and bottom ~45% height where the character name pill sits
+        image.crop(0, Math.floor(h * 0.55), Math.floor(w * 0.42), Math.floor(h * 0.45))
+             .scale(3)
+             .greyscale()
+             .contrast(0.7)
+             .invert(); // Turns white text on dark background into black text on white background
+        return await image.getBufferAsync(Jimp.MIME_PNG);
+    } catch (error) {
+        console.error('Name crop processing error:', error);
         return null;
     }
 }
@@ -34,7 +54,7 @@ function detectJobRoleName(text) {
     if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return 'Bowman';
     if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
 
-    return null; // Beginner or unrecognized job
+    return null;
 }
 
 // 1. Fetch ClassicRank page and extract job specifically from the character info table
@@ -48,7 +68,6 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        // Isolate the JOB section from ClassicRank's HTML structure
         const jobMatch = html.match(/JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
         let jobRole = null;
 
@@ -68,20 +87,33 @@ async function getClassicRankData(characterName) {
     }
 }
 
-// 2. Read text from the preprocessed screenshot using Tesseract OCR
-async function verifyScreenshot(imageUrl) {
+// 2. Read both the cropped Name box and full Character Info window
+async function verifyScreenshot(imageUrl, targetIgn) {
     try {
-        const processedImageBuffer = await preprocessImage(imageUrl);
-        if (!processedImageBuffer) {
-            return { screenshotJobRole: null };
-        }
+        const [fullBuffer, nameBuffer] = await Promise.all([
+            preprocessFullImage(imageUrl),
+            preprocessNameArea(imageUrl)
+        ]);
 
-        const { data: { text } } = await Tesseract.recognize(processedImageBuffer, 'eng');
-        const screenshotJobRole = detectJobRoleName(text);
-        return { screenshotJobRole };
+        if (!fullBuffer) return { hasIgn: false, screenshotJobRole: null };
+
+        const [fullOcr, nameOcr] = await Promise.all([
+            Tesseract.recognize(fullBuffer, 'eng'),
+            nameBuffer ? Tesseract.recognize(nameBuffer, 'eng') : Promise.resolve({ data: { text: '' } })
+        ]);
+
+        const combinedText = `${fullOcr.data.text} ${nameOcr.data.text}`;
+        // Strip spaces/punctuation to avoid minor OCR spacing glitches on names
+        const normalizedText = combinedText.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normalizedIgn = targetIgn.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+        const hasIgn = normalizedText.includes(normalizedIgn);
+        const screenshotJobRole = detectJobRoleName(fullOcr.data.text);
+
+        return { hasIgn, screenshotJobRole };
     } catch (error) {
         console.error('OCR Error:', error);
-        return { screenshotJobRole: null };
+        return { hasIgn: false, screenshotJobRole: null };
     }
 }
 
@@ -130,7 +162,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
-    // Check ClassicRank profile & job
+    // 1. Check ClassicRank profile & job
     const trackerData = await getClassicRankData(rawIgn);
     if (!trackerData.exists) {
         return interaction.editReply(
@@ -143,24 +175,37 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    const ocrResult = await verifyScreenshot(attachment.url);
+    // 2. Verify screenshot name & job
+    const ocrResult = await verifyScreenshot(attachment.url, rawIgn);
 
-    // Prioritize screenshot OCR first, fallback to scoped ClassicRank data
+    if (!ocrResult.hasIgn) {
+        return interaction.editReply(
+            `❌ **Name Mismatch:** Could not find **"${rawIgn}"** in your screenshot.\n` +
+            `*Make sure you uploaded the Character Info screenshot for **${rawIgn}** (cropped cleanly around the Character Info window).*`
+        );
+    }
+
+    // 3. Reject if ClassicRank and Screenshot show conflicting classes
+    if (trackerData.jobRole && ocrResult.screenshotJobRole && trackerData.jobRole !== ocrResult.screenshotJobRole) {
+        return interaction.editReply(
+            `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
+            `but your screenshot shows **${ocrResult.screenshotJobRole}**.\n` +
+            `*Please upload an up-to-date screenshot matching your character!*`
+        );
+    }
+
     const detectedRoleName = ocrResult.screenshotJobRole || trackerData.jobRole;
 
     try {
         const member = interaction.member;
         const guild = interaction.guild;
 
-        // 1. Lock nickname
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
 
-        // 2. Add base Verified role (if configured in Render)
         if (process.env.VERIFIED_ROLE_ID) {
             await member.roles.add(process.env.VERIFIED_ROLE_ID);
         }
 
-        // 3. Find and assign the matching Job Role
         let assignedJobText = 'None detected (Beginner)';
         if (detectedRoleName) {
             const jobRole = guild.roles.cache.find(r => r.name.toLowerCase() === detectedRoleName.toLowerCase());
@@ -190,7 +235,6 @@ client.on('interactionCreate', async interaction => {
 
 client.login(process.env.DISCORD_TOKEN);
 
-// Keep-alive HTTP server required for Render's Free Web Service
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('MapleStory Classic Verification Bot is online!\n');
