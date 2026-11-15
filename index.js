@@ -24,21 +24,20 @@ async function preprocessImage(imageUrl) {
     }
 }
 
-// Fixed Maps MapleStory jobs/advancements to exact Discord role names
+// Maps MapleStory jobs/advancements to exact Discord role names
 function detectJobRoleName(text) {
     const lower = text.toLowerCase();
 
-    // Check specific job lines first to prevent false overlaps
-    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
     if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
     if (/\b(magician|wizard|mage|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return 'Mage';
     if (/\b(warrior|fighter|page|spearman|crusader|white knight|dragon knight|hero|paladin|dark knight)\b/.test(lower)) return 'Warrior';
     if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return 'Bowman';
+    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
 
     return null; // Beginner or unrecognized job
 }
 
-// 1. Fetch ClassicRank page and extract the character's job class
+// 1. Fetch ClassicRank page and extract job specifically from the character info table
 async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
@@ -49,9 +48,18 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        // Strip HTML tags to read the visible profile text
-        const cleanText = html.replace(/<[^>]*>/g, ' ');
-        const jobRole = detectJobRoleName(cleanText);
+        // Isolate the JOB section from ClassicRank's HTML structure
+        const jobMatch = html.match(/JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
+        let jobRole = null;
+
+        if (jobMatch && jobMatch[1]) {
+            jobRole = detectJobRoleName(jobMatch[1]);
+        }
+
+        if (!jobRole) {
+            const cleanText = html.replace(/<[^>]*>/g, ' ');
+            jobRole = detectJobRoleName(cleanText);
+        }
 
         return { exists: true, jobRole };
     } catch (error) {
@@ -137,8 +145,8 @@ client.on('interactionCreate', async interaction => {
 
     const ocrResult = await verifyScreenshot(attachment.url);
 
-    // Use ClassicRank's detected job first, or fall back to whatever job was read from the screenshot
-    const detectedRoleName = trackerData.jobRole || ocrResult.screenshotJobRole;
+    // Prioritize screenshot OCR first, fallback to scoped ClassicRank data
+    const detectedRoleName = ocrResult.screenshotJobRole || trackerData.jobRole;
 
     try {
         const member = interaction.member;
