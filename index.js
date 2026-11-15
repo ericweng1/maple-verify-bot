@@ -48,7 +48,6 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        // Target specifically the CHARACTER INFO section block
         const charInfoIdx = html.indexOf('CHARACTER INFO');
         if (charInfoIdx !== -1) {
             const profileHtml = html.substring(charInfoIdx, charInfoIdx + 1200);
@@ -57,7 +56,6 @@ async function getClassicRankData(characterName) {
             if (jobRole) return { exists: true, jobRole };
         }
 
-        // Fallback search
         const cleanText = html.replace(/<[^>]*>/g, ' ');
         const jobRole = detectJobRoleName(cleanText);
 
@@ -115,6 +113,19 @@ client.on('interactionCreate', async interaction => {
 
     await interaction.deferReply({ ephemeral: true });
 
+    const member = interaction.member;
+
+    // Define forbidden roles (You can add specific Role IDs or set BLOCKED_ROLE_IDS in Render environment variables)
+    // Example format for env variable: process.env.BLOCKED_ROLE_IDS ? process.env.BLOCKED_ROLE_IDS.split(',') : []
+    const blockedRoleIds = process.env.BLOCKED_ROLE_IDS ? process.env.BLOCKED_ROLE_IDS.split(',').map(id => id.trim()) : [];
+
+    // Check if user has any of the restricted roles
+    const hasRestrictedRole = blockedRoleIds.some(roleId => member.roles.cache.has(roleId));
+
+    if (hasRestrictedRole) {
+        return interaction.editReply('❌ You possess a role that prevents you from using the verification command.');
+    }
+
     const rawIgn = interaction.options.getString('character').trim();
     const ignKey = rawIgn.toLowerCase();
     const attachment = interaction.options.getAttachment('screenshot');
@@ -156,7 +167,6 @@ client.on('interactionCreate', async interaction => {
     const detectedRoleName = trackerData.jobRole || screenshotJob;
 
     try {
-        const member = interaction.member;
         const guild = interaction.guild;
 
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
