@@ -37,7 +37,7 @@ function detectJobRoleName(text) {
     return null;
 }
 
-// 1. Fetch ClassicRank page and robustly extract the job near the "JOB" label
+// 1. Fetch ClassicRank page and extract the exact job class securely
 async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
@@ -48,25 +48,17 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        // Clean HTML into plain text
         const cleanText = html.replace(/<[^>]*>/g, ' ');
-        
-        // Find "JOB" in the text and grab the surrounding words to isolate the character's class
-        const jobIndex = cleanText.indexOf('JOB');
-        let jobRole = null;
+        const lower = cleanText.toLowerCase();
 
-        if (jobIndex !== -1) {
-            // Take a slice of text right after "JOB"
-            const jobSnippet = cleanText.substring(jobIndex, jobIndex + 60);
-            jobRole = detectJobRoleName(jobSnippet);
-        }
+        // Check specific classes first to avoid generic header/footer keyword pollution
+        if (/\b(assassin|bandit|hermit|chief bandit|night lord|shadower|rogue)\b/.test(lower)) return { exists: true, jobRole: 'Rogue' };
+        if (/\b(cleric|priest|bishop)\b/.test(lower)) return { exists: true, jobRole: 'Cleric' };
+        if (/\b(magician|wizard|mage|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return { exists: true, jobRole: 'Mage' };
+        if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return { exists: true, jobRole: 'Bowman' };
+        if (/\b(warrior|fighter|page|spearman|crusader|white knight|dragon knight|hero|paladin|dark knight)\b/.test(lower)) return { exists: true, jobRole: 'Warrior' };
 
-        // Fallback: search the entire clean text if snippet check misses
-        if (!jobRole) {
-            jobRole = detectJobRoleName(cleanText);
-        }
-
-        return { exists: true, jobRole };
+        return { exists: true, jobRole: null };
     } catch (error) {
         console.error('ClassicRank Lookup Error:', error);
         return { exists: true, jobRole: null };
@@ -185,7 +177,7 @@ client.on('interactionCreate', async interaction => {
             .setTitle('✅ Character Verified!')
             .setDescription(
                 `Welcome, **${rawIgn}**!\n` +
-                `• **Nickname:** Locked to \`${rawIgn}\`\n` +
+                `• **Nickname:** Locked to \`$ {rawIgn}\`\n` +
                 `• **Class Role:** ${assignedJobText}`
             )
             .setColor(0x00FF00);
