@@ -9,7 +9,7 @@ const client = new Client({
 
 const claimedCharacters = new Map();
 
-// Preprocess full screenshot for reading JOB / LEVEL
+// Improved image preprocessing for game fonts
 async function preprocessFullImage(imageUrl) {
     try {
         const image = await Jimp.read(imageUrl);
@@ -19,27 +19,7 @@ async function preprocessFullImage(imageUrl) {
              .contrast(0.4);
         return await image.getBufferAsync(Jimp.MIME_PNG);
     } catch (error) {
-        console.error('Full image processing error:', error);
-        return null;
-    }
-}
-
-// Preprocess cropped left-side nameplate box (white text on dark pill) for IGN check
-async function preprocessNameArea(imageUrl) {
-    try {
-        const image = await Jimp.read(imageUrl);
-        const w = image.bitmap.width;
-        const h = image.bitmap.height;
-
-        // Crop the left ~42% width and bottom ~45% height where the character name pill sits
-        image.crop(0, Math.floor(h * 0.55), Math.floor(w * 0.42), Math.floor(h * 0.45))
-             .scale(3)
-             .greyscale()
-             .contrast(0.7)
-             .invert(); // Turns white text on dark background into black text on white background
-        return await image.getBufferAsync(Jimp.MIME_PNG);
-    } catch (error) {
-        console.error('Name crop processing error:', error);
+        console.error('Image processing error:', error);
         return null;
     }
 }
@@ -87,28 +67,19 @@ async function getClassicRankData(characterName) {
     }
 }
 
-// 2. Read both the cropped Name box and full Character Info window
+// 2. Read text from the preprocessed screenshot using Tesseract OCR
 async function verifyScreenshot(imageUrl, targetIgn) {
     try {
-        const [fullBuffer, nameBuffer] = await Promise.all([
-            preprocessFullImage(imageUrl),
-            preprocessNameArea(imageUrl)
-        ]);
+        const processedBuffer = await preprocessFullImage(imageUrl);
+        if (!processedBuffer) return { hasIgn: false, screenshotJobRole: null };
 
-        if (!fullBuffer) return { hasIgn: false, screenshotJobRole: null };
-
-        const [fullOcr, nameOcr] = await Promise.all([
-            Tesseract.recognize(fullBuffer, 'eng'),
-            nameBuffer ? Tesseract.recognize(nameBuffer, 'eng') : Promise.resolve({ data: { text: '' } })
-        ]);
-
-        const combinedText = `${fullOcr.data.text} ${nameOcr.data.text}`;
-        // Strip spaces/punctuation to avoid minor OCR spacing glitches on names
-        const normalizedText = combinedText.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const { data: { text } } = await Tesseract.recognize(processedBuffer, 'eng');
+        
+        const normalizedText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
         const normalizedIgn = targetIgn.toLowerCase().replace(/[^a-z0-9]/g, '');
 
         const hasIgn = normalizedText.includes(normalizedIgn);
-        const screenshotJobRole = detectJobRoleName(fullOcr.data.text);
+        const screenshotJobRole = detectJobRoleName(text);
 
         return { hasIgn, screenshotJobRole };
     } catch (error) {
@@ -175,13 +146,13 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    // 2. Verify screenshot name & job
+    // 2. Verify screenshot name & job across the entire processed image
     const ocrResult = await verifyScreenshot(attachment.url, rawIgn);
 
     if (!ocrResult.hasIgn) {
         return interaction.editReply(
-            `❌ **Name Mismatch:** Could not find **"${rawIgn}"** in your screenshot.\n` +
-            `*Make sure you uploaded the Character Info screenshot for **${rawIgn}** (cropped cleanly around the Character Info window).*`
+            `❌ **Name Mismatch:** Could not find **"${rawIgn}"** in your screenshot[cite: 12].\n` +
+            `*Make sure you uploaded the Character Info screenshot for **${rawIgn}**.*`
         );
     }
 
