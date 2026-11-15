@@ -13,7 +13,6 @@ const claimedCharacters = new Map();
 async function preprocessImage(imageUrl) {
     try {
         const image = await Jimp.read(imageUrl);
-        // Scale up 2x, convert to greyscale, normalize, and boost contrast
         image.scale(2)
              .greyscale()
              .normalize()
@@ -201,4 +200,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🌐 Web server listening on port ${PORT}`);
 });
-```[cite: 1]
