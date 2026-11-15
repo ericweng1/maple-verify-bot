@@ -37,7 +37,7 @@ function detectJobRoleName(text) {
     return null;
 }
 
-// 1. Fetch ClassicRank page and target specifically the CHARACTER INFO card
+// 1. Fetch ClassicRank page and robustly extract the job
 async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
@@ -48,19 +48,9 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        const charInfoMatch = html.match(/CHARACTER INFO[\s\S]*?JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
-        let jobRole = null;
-
-        if (charInfoMatch && charInfoMatch[1]) {
-            jobRole = detectJobRoleName(charInfoMatch[1]);
-        }
-
-        if (!jobRole) {
-            const jobMatch = html.match(/JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
-            if (jobMatch && jobMatch[1]) {
-                jobRole = detectJobRoleName(jobMatch[1]);
-            }
-        }
+        // Clean HTML tags into a readable text flow to easily find the job label
+        const cleanText = html.replace(/<[^>]*>/g, ' ');
+        const jobRole = detectJobRoleName(cleanText);
 
         return { exists: true, jobRole };
     } catch (error) {
@@ -154,7 +144,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // Use ClassicRank's verified job class
-    const detectedRoleName = trackerData.jobRole;
+    const detectedRoleName = trackerData.jobRole || screenshotJob;
 
     try {
         const member = interaction.member;
