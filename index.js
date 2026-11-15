@@ -69,17 +69,24 @@ async function getClassicRankData(characterName) {
     }
 }
 
-// 2. Read job from screenshot OCR
-async function verifyScreenshotJob(imageUrl) {
+// 2. Read text, name presence, and job from screenshot OCR
+async function verifyScreenshot(imageUrl, targetIgn) {
     try {
         const processedBuffer = await preprocessFullImage(imageUrl);
-        if (!processedBuffer) return null;
+        if (!processedBuffer) return { hasIgn: false, screenshotJobRole: null };
 
         const { data: { text } } = await Tesseract.recognize(processedBuffer, 'eng');
-        return detectJobRoleName(text);
+        
+        const normalizedText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normalizedIgn = targetIgn.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+        const hasIgn = normalizedText.includes(normalizedIgn);
+        const screenshotJobRole = detectJobRoleName(text);
+
+        return { hasIgn, screenshotJobRole };
     } catch (error) {
         console.error('OCR Error:', error);
-        return null;
+        return { hasIgn: false, screenshotJobRole: null };
     }
 }
 
@@ -141,19 +148,27 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    // 2. Read job from screenshot via OCR
-    const screenshotJob = await verifyScreenshotJob(attachment.url);
+    // 2. Run OCR verification on the screenshot for both Name and Job
+    const ocrResult = await verifyScreenshot(attachment.url, rawIgn);
 
-    // 3. Prevent class mismatches
-    if (trackerData.jobRole && screenshotJob && trackerData.jobRole !== screenshotJob) {
+    // 3. Strict Check: The character name must appear in the screenshot text
+    if (!ocrResult.hasIgn) {
         return interaction.editReply(
-            `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
-            `but your screenshot shows **${screenshotJob}**.\n` +
-            `*Please upload a screenshot matching your character.*`
+            `❌ **Verification Failed:** The name **"${rawIgn}"** was not found in your uploaded screenshot.\n` +
+            `*Please upload the correct Character Info screenshot for **${rawIgn}**.*`
         );
     }
 
-    const detectedRoleName = trackerData.jobRole || screenshotJob;
+    // 4. Strict Check: If ClassicRank and Screenshot job classes disagree, block it
+    if (trackerData.jobRole && ocrResult.screenshotJobRole && trackerData.jobRole !== ocrResult.screenshotJobRole) {
+        return interaction.editReply(
+            `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
+            `but your screenshot shows **${ocrResult.screenshotJobRole}**.\n` +
+            `*Please upload an up-em-date screenshot matching your character.*`
+        );
+    }
+
+    const detectedRoleName = trackerData.jobRole || ocrResult.screenshotJobRole;
 
     try {
         const member = interaction.member;
