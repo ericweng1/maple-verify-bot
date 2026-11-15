@@ -37,7 +37,7 @@ function detectJobRoleName(text) {
     return null;
 }
 
-// 1. Fetch ClassicRank page and target specifically the CHARACTER INFO card
+// 1. Fetch ClassicRank page and robustly extract the job near the "JOB" label
 async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
@@ -48,18 +48,22 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        const charInfoMatch = html.match(/CHARACTER INFO[\s\S]*?JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
+        // Clean HTML into plain text
+        const cleanText = html.replace(/<[^>]*>/g, ' ');
+        
+        // Find "JOB" in the text and grab the surrounding words to isolate the character's class
+        const jobIndex = cleanText.indexOf('JOB');
         let jobRole = null;
 
-        if (charInfoMatch && charInfoMatch[1]) {
-            jobRole = detectJobRoleName(charInfoMatch[1]);
+        if (jobIndex !== -1) {
+            // Take a slice of text right after "JOB"
+            const jobSnippet = cleanText.substring(jobIndex, jobIndex + 60);
+            jobRole = detectJobRoleName(jobSnippet);
         }
 
+        // Fallback: search the entire clean text if snippet check misses
         if (!jobRole) {
-            const jobMatch = html.match(/JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
-            if (jobMatch && jobMatch[1]) {
-                jobRole = detectJobRoleName(jobMatch[1]);
-            }
+            jobRole = detectJobRoleName(cleanText);
         }
 
         return { exists: true, jobRole };
@@ -154,7 +158,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // Use ClassicRank's verified job class
-    const detectedRoleName = trackerData.jobRole;
+    const detectedRoleName = trackerData.jobRole || screenshotJob;
 
     try {
         const member = interaction.member;
