@@ -61,20 +61,19 @@ async function getClassicRankData(characterName) {
 }
 
 // 2. Read text from the preprocessed screenshot using Tesseract OCR
-async function verifyScreenshot(imageUrl, targetIgn) {
+async function verifyScreenshot(imageUrl) {
     try {
         const processedImageBuffer = await preprocessImage(imageUrl);
         if (!processedImageBuffer) {
-            return { hasIgn: false, screenshotJobRole: null };
+            return { screenshotJobRole: null };
         }
 
         const { data: { text } } = await Tesseract.recognize(processedImageBuffer, 'eng');
-        const hasIgn = text.toLowerCase().includes(targetIgn.toLowerCase());
         const screenshotJobRole = detectJobRoleName(text);
-        return { hasIgn, screenshotJobRole };
+        return { screenshotJobRole };
     } catch (error) {
         console.error('OCR Error:', error);
-        return { hasIgn: false, screenshotJobRole: null };
+        return { screenshotJobRole: null };
     }
 }
 
@@ -123,7 +122,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
-    // Check ClassicRank profile & job
+    // Check ClassicRank profile & job (Primary Security Check)
     const trackerData = await getClassicRankData(rawIgn);
     if (!trackerData.exists) {
         return interaction.editReply(
@@ -136,14 +135,8 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    // Run OCR on preprocessed screenshot
-    const ocrResult = await verifyScreenshot(attachment.url, rawIgn);
-    if (!ocrResult.hasIgn) {
-        return interaction.editReply(
-            `❌ **Screenshot Check Failed:** Could not read **"${rawIgn}"** in your screenshot.\n` +
-            `*Tip: Double-click your character in-game so your Character Info box (Name/Level/Job) is clearly visible.*`
-        );
-    }
+    // Run OCR just to check for class/job info, bypassing strict name text matching
+    const ocrResult = await verifyScreenshot(attachment.url);
 
     // Use ClassicRank's detected job first, or fall back to whatever job was read from the screenshot
     const detectedRoleName = trackerData.jobRole || ocrResult.screenshotJobRole;
