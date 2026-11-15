@@ -6,32 +6,54 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// In-memory store to prevent two Discord users from claiming the same IGN
 const claimedCharacters = new Map();
 
-// 1. Check if character exists on ClassicRank (e.g., https://classicrank.com/user/DoughNut)
-async function checkClassicRank(characterName) {
+// Maps MapleStory jobs/advancements to your exact Discord role names
+function detectJobRoleName(text) {
+    const lower = text.toLowerCase();
+
+    // Check Cleric first so it doesn't get grouped under Mage
+    if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
+    if (/\b(magician|wizard|mage|f\/p|i\/l|fire\/poison|ice\/lightning|arch mage)\b/.test(lower)) return 'Mage';
+    if (/\b(warrior|fighter|page|spearman|crusader|white knight|dragon knight|hero|paladin|dark knight)\b/.test(lower)) return 'Warrior';
+    if (/\b(bowman|hunter|crossbowman|ranger|sniper|bowmaster|marksman)\b/.test(lower)) return 'Bowman';
+    if (/\b(rogue|assassin|bandit|hermit|chief bandit|night lord|shadower)\b/.test(lower)) return 'Rogue';
+
+    return null; // Beginner or unrecognized job
+}
+
+// 1. Fetch ClassicRank page and extract the character's job class
+async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
-        if (response.status === 404) return false;
-        
+        if (response.status === 404 || !response.ok) return { exists: false, jobRole: null };
+
         const html = await response.text();
-        // Verify the profile actually loaded and isn't a generic "not found" page
-        return response.ok && !html.toLowerCase().includes('character not found');
+        if (html.toLowerCase().includes('character not found')) {
+            return { exists: false, jobRole: null };
+        }
+
+        // Strip HTML tags to read the visible profile text
+        const cleanText = html.replace(/<[^>]*>/g, ' ');
+        const jobRole = detectJobRoleName(cleanText);
+
+        return { exists: true, jobRole };
     } catch (error) {
         console.error('ClassicRank Lookup Error:', error);
-        return true; // Fallback so users aren't blocked if ClassicRank goes down temporarily
+        return { exists: true, jobRole: null };
     }
 }
 
 // 2. Read text from the uploaded screenshot using Tesseract OCR
-async function verifyScreenshotText(imageUrl, targetIgn) {
+async function verifyScreenshot(imageUrl, targetIgn) {
     try {
         const { data: { text } } = await Tesseract.recognize(imageUrl, 'eng');
-        return text.toLowerCase().includes(targetIgn.toLowerCase());
+        const hasIgn = text.toLowerCase().includes(targetIgn.toLowerCase());
+        const screenshotJobRole = detectJobRoleName(text);
+        return { hasIgn, screenshotJobRole };
     } catch (error) {
         console.error('OCR Error:', error);
-        return false;
+        return { hasIgn: false, screenshotJobRole: null };
     }
 }
 
@@ -40,7 +62,7 @@ client.once('ready', async () => {
 
     const command = new SlashCommandBuilder()
         .setName('verify')
-        .setDescription('Verify your MapleStory Classic character and lock your nickname.')
+        .setDescription('Verify your MapleStory Classic character, job role, and nickname.')
         .addStringOption(option =>
             option.setName('character')
                 .setDescription('Your exact in-game character name')
@@ -48,7 +70,7 @@ client.once('ready', async () => {
         )
         .addAttachmentOption(option =>
             option.setName('screenshot')
-                .setDescription('Screenshot of your Character Info window or character name in-game')
+                .setDescription('Screenshot of your Character Info window in-game')
                 .setRequired(true)
         );
 
@@ -72,56 +94,76 @@ client.on('interactionCreate', async interaction => {
     const ignKey = rawIgn.toLowerCase();
     const attachment = interaction.options.getAttachment('screenshot');
 
-    // Validate MapleStory IGN format (4-12 alphanumeric characters)
     if (!/^[a-zA-Z0-9]{4,12}$/.test(rawIgn)) {
         return interaction.editReply('❌ Invalid IGN. MapleStory names must be 4–12 letters or numbers with no spaces.');
     }
 
-    // Check if another Discord member already claimed this IGN
     if (claimedCharacters.has(ignKey) && claimedCharacters.get(ignKey) !== interaction.user.id) {
         return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
-    // Check ClassicRank profile
-    const existsOnTracker = await checkClassicRank(rawIgn);
-    if (!existsOnTracker) {
+    // Check ClassicRank profile & job
+    const trackerData = await getClassicRankData(rawIgn);
+    if (!trackerData.exists) {
         return interaction.editReply(
             `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
             `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
         );
     }
 
-    // Validate image file type
     if (!attachment.contentType || !attachment.contentType.startsWith('image/')) {
         return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
     }
 
-    // Run OCR on the screenshot
-    const ocrPassed = await verifyScreenshotText(attachment.url, rawIgn);
-    if (!ocrPassed) {
+    // Run OCR on screenshot
+    const ocrResult = await verifyScreenshot(attachment.url, rawIgn);
+    if (!ocrResult.hasIgn) {
         return interaction.editReply(
             `❌ **Screenshot Check Failed:** Could not read **"${rawIgn}"** in your screenshot.\n` +
-            `*Tip: Open your Character Info window in-game so your name is clearly visible and uncropped.*`
+            `*Tip: Double-click your character in-game so your Character Info box (Name/Level/Job) is clearly visible.*`
         );
     }
 
-    // Assign Role & Lock Nickname
+    // Use ClassicRank's detected job first, or fall back to whatever job was read from the screenshot
+    const detectedRoleName = trackerData.jobRole || ocrResult.screenshotJobRole;
+
     try {
         const member = interaction.member;
+        const guild = interaction.guild;
+
+        // 1. Lock nickname
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
-        await member.roles.add(process.env.VERIFIED_ROLE_ID);
+
+        // 2. Add base Verified role (if configured in Render)
+        if (process.env.VERIFIED_ROLE_ID) {
+            await member.roles.add(process.env.VERIFIED_ROLE_ID);
+        }
+
+        // 3. Find and assign the matching Job Role (Cleric, Warrior, Mage, Bowman, Rogue)
+        let assignedJobText = 'None detected (Beginner)';
+        if (detectedRoleName) {
+            const jobRole = guild.roles.cache.find(r => r.name.toLowerCase() === detectedRoleName.toLowerCase());
+            if (jobRole) {
+                await member.roles.add(jobRole);
+                assignedJobText = `**${jobRole.name}**`;
+            }
+        }
 
         claimedCharacters.set(ignKey, interaction.user.id);
 
         const embed = new EmbedBuilder()
             .setTitle('✅ Character Verified!')
-            .setDescription(`Welcome, **${rawIgn}**! Your verified role has been assigned and your server nickname is now locked.`)
+            .setDescription(
+                `Welcome, **${rawIgn}**!\n` +
+                `• **Nickname:** Locked to \`${rawIgn}\`\n` +
+                `• **Class Role:** ${assignedJobText}`
+            )
             .setColor(0x00FF00);
 
         await interaction.editReply({ embeds: [embed] });
     } catch (error) {
         console.error('Permission/Hierarchy Error:', error);
-        await interaction.editReply('❌ Verification passed, but I could not change your nickname or role. (Check that my bot role is above yours in Server Settings).');
+        await interaction.editReply('❌ Verification passed, but I lacked permission to set your nickname or role. Make sure the bot\'s role is dragged **above** Cleric, Warrior, Mage, Bowman, and Rogue in Server Settings.');
     }
 });
 
@@ -137,3 +179,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🌐 Web server listening on port ${PORT}`);
 });
+```[cite: 1]
