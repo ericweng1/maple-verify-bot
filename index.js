@@ -37,7 +37,7 @@ function detectJobRoleName(text) {
     return null;
 }
 
-// 1. Fetch ClassicRank page and extract job specifically from the character info table
+// 1. Fetch ClassicRank page and target specifically the CHARACTER INFO card
 async function getClassicRankData(characterName) {
     try {
         const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
@@ -48,16 +48,18 @@ async function getClassicRankData(characterName) {
             return { exists: false, jobRole: null };
         }
 
-        const jobMatch = html.match(/JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
+        const charInfoMatch = html.match(/CHARACTER INFO[\s\S]*?JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
         let jobRole = null;
 
-        if (jobMatch && jobMatch[1]) {
-            jobRole = detectJobRoleName(jobMatch[1]);
+        if (charInfoMatch && charInfoMatch[1]) {
+            jobRole = detectJobRoleName(charInfoMatch[1]);
         }
 
         if (!jobRole) {
-            const cleanText = html.replace(/<[^>]*>/g, ' ');
-            jobRole = detectJobRoleName(cleanText);
+            const jobMatch = html.match(/JOB<\/div>[\s\S]*?<div[^>]*>([^<]+)<\/div>/i);
+            if (jobMatch && jobMatch[1]) {
+                jobRole = detectJobRoleName(jobMatch[1]);
+            }
         }
 
         return { exists: true, jobRole };
@@ -126,7 +128,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
-    // 1. Check ClassicRank profile & job (Guarantees the character exists online)
+    // 1. Check ClassicRank profile & job
     const trackerData = await getClassicRankData(rawIgn);
     if (!trackerData.exists) {
         return interaction.editReply(
@@ -142,7 +144,7 @@ client.on('interactionCreate', async interaction => {
     // 2. Read job from screenshot via OCR
     const screenshotJob = await verifyScreenshotJob(attachment.url);
 
-    // 3. Prevent class mismatches (e.g. submitting a Warrior screenshot for a Mage character)
+    // 3. Prevent class mismatches
     if (trackerData.jobRole && screenshotJob && trackerData.jobRole !== screenshotJob) {
         return interaction.editReply(
             `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
@@ -151,7 +153,6 @@ client.on('interactionCreate', async interaction => {
         );
     }
 
-    // Use ClassicRank's job first, falling back to screenshot OCR job
     const detectedRoleName = trackerData.jobRole || screenshotJob;
 
     try {
