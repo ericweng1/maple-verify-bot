@@ -128,7 +128,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
     }
 
-    // 1. Check ClassicRank profile & job (Guarantees character exists online)
+    // 1. Check ClassicRank profile & job
     const trackerData = await getClassicRankData(rawIgn);
     if (!trackerData.exists) {
         return interaction.editReply(
@@ -144,12 +144,12 @@ client.on('interactionCreate', async interaction => {
     // 2. Read job from screenshot via OCR
     const screenshotJob = await verifyScreenshotJob(attachment.url);
 
-    // 3. Prevent class mismatches (e.g. submitting an Assassin screenshot for a Cleric character)
+    // 3. Strict Anti-Spoofing: Ensure the screenshot's class matches ClassicRank's class
     if (trackerData.jobRole && screenshotJob && trackerData.jobRole !== screenshotJob) {
         return interaction.editReply(
             `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
             `but your screenshot shows **${screenshotJob}**.\n` +
-            `*Please upload a screenshot matching your character.*`
+            `*Please upload a screenshot matching your character's actual class.*`
         );
     }
 
