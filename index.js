@@ -144,8 +144,8 @@ client.on('interactionCreate', async interaction => {
     // 2. Read job from screenshot via OCR
     const screenshotJob = await verifyScreenshotJob(attachment.url);
 
-    // 3. Strict Anti-Spoofing: Ensure the screenshot's class matches ClassicRank's class
-    if (trackerData.jobRole && screenshotJob && trackerData.jobRole !== screenshotJob) {
+    // 3. Strict Anti-Spoofing: If the screenshot contains a detectable job and it doesn't match ClassicRank, block it
+    if (trackerData.jobRole && screenshotJob && trackerData.jobRole.toLowerCase() !== screenshotJob.toLowerCase()) {
         return interaction.editReply(
             `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
             `but your screenshot shows **${screenshotJob}**.\n` +
@@ -153,8 +153,8 @@ client.on('interactionCreate', async interaction => {
         );
     }
 
-    // Use ClassicRank's job first, falling back to screenshot OCR job
-    const detectedRoleName = trackerData.jobRole || screenshotJob;
+    // Use ClassicRank's verified job class
+    const detectedRoleName = trackerData.jobRole;
 
     try {
         const member = interaction.member;
