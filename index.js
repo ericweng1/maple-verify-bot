@@ -111,59 +111,60 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand() || interaction.commandName !== 'verify') return;
 
-    await interaction.deferReply({ ephemeral: true });
-
-    const member = interaction.member;
-
-    // Check if the user already has a job role assigned
-    const jobRoleNames = ['cleric', 'mage', 'warrior', 'bowman', 'rogue'];
-    const alreadyHasJob = member.roles.cache.some(r => jobRoleNames.includes(r.name.toLowerCase()));
-
-    if (alreadyHasJob) {
-        return interaction.editReply('❌ You are already verified and already possess a class role!');
-    }
-
-    const rawIgn = interaction.options.getString('character').trim();
-    const ignKey = rawIgn.toLowerCase();
-    const attachment = interaction.options.getAttachment('screenshot');
-
-    if (!/^[a-zA-Z0-9]{4,12}$/.test(rawIgn)) {
-        return interaction.editReply('❌ Invalid IGN. MapleStory names must be 4–12 letters or numbers with no spaces.');
-    }
-
-    if (claimedCharacters.has(ignKey) && claimedCharacters.get(ignKey) !== interaction.user.id) {
-        return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
-    }
-
-    // 1. Check ClassicRank profile & job
-    const trackerData = await getClassicRankData(rawIgn);
-    if (!trackerData.exists) {
-        return interaction.editReply(
-            `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
-            `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
-        );
-    }
-
-    if (!attachment.contentType || !attachment.contentType.startsWith('image/')) {
-        return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
-    }
-
-    // 2. Read job from screenshot via OCR
-    const screenshotJob = await verifyScreenshotJob(attachment.url);
-
-    // 3. Strict Anti-Spoofing: If the screenshot contains a detectable job and it doesn't match ClassicRank, block it
-    if (trackerData.jobRole && screenshotJob && trackerData.jobRole.toLowerCase() !== screenshotJob.toLowerCase()) {
-        return interaction.editReply(
-            `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
-            `but your screenshot shows **${screenshotJob}**.\n` +
-            `*Please upload a screenshot matching your character's actual class.*`
-        );
-    }
-
-    // Use ClassicRank's verified job class
-    const detectedRoleName = trackerData.jobRole;
-
     try {
+        await interaction.deferReply({ ephemeral: true });
+
+        // Safely fetch full member object with roles
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+
+        // Check if the user already has a job role assigned
+        const jobRoleNames = ['cleric', 'mage', 'warrior', 'bowman', 'rogue'];
+        const alreadyHasJob = member.roles.cache.some(r => jobRoleNames.includes(r.name.toLowerCase()));
+
+        if (alreadyHasJob) {
+            return interaction.editReply('❌ You are already verified and already possess a class role!');
+        }
+
+        const rawIgn = interaction.options.getString('character').trim();
+        const ignKey = rawIgn.toLowerCase();
+        const attachment = interaction.options.getAttachment('screenshot');
+
+        if (!/^[a-zA-Z0-9]{4,12}$/.test(rawIgn)) {
+            return interaction.editReply('❌ Invalid IGN. MapleStory names must be 4–12 letters or numbers with no spaces.');
+        }
+
+        if (claimedCharacters.has(ignKey) && claimedCharacters.get(ignKey) !== interaction.user.id) {
+            return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
+        }
+
+        // 1. Check ClassicRank profile & job
+        const trackerData = await getClassicRankData(rawIgn);
+        if (!trackerData.exists) {
+            return interaction.editReply(
+                `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
+                `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
+            );
+        }
+
+        if (!attachment.contentType || !attachment.contentType.startsWith('image/')) {
+            return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
+        }
+
+        // 2. Read job from screenshot via OCR
+        const screenshotJob = await verifyScreenshotJob(attachment.url);
+
+        // 3. Strict Anti-Spoofing: If the screenshot contains a detectable job and it doesn't match ClassicRank, block it
+        if (trackerData.jobRole && screenshotJob && trackerData.jobRole.toLowerCase() !== screenshotJob.toLowerCase()) {
+            return interaction.editReply(
+                `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
+                `but your screenshot shows **${screenshotJob}**.\n` +
+                `*Please upload a screenshot matching your character's actual class.*`
+            );
+        }
+
+        // Use ClassicRank's verified job class
+        const detectedRoleName = trackerData.jobRole || screenshotJob;
+
         const guild = interaction.guild;
 
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
@@ -193,9 +194,14 @@ client.on('interactionCreate', async interaction => {
             .setColor(0x00FF00);
 
         await interaction.editReply({ embeds: [embed] });
+
     } catch (error) {
-        console.error('Permission/Hierarchy Error:', error);
-        await interaction.editReply('❌ Verification passed, but I lacked permission to set your nickname or role. Make sure the bot\'s role is dragged **above** Cleric, Warrior, Mage, Bowman, and Rogue in Server Settings.');
+        console.error('Interaction Execution Error:', error);
+        if (interaction.deferred || interaction.replied) {
+            await interaction.editReply('❌ An unexpected error occurred while processing your verification. Please try again or contact a moderator.').catch(() => {});
+        } else {
+            await interaction.reply({ content: '❌ An unexpected error occurred while processing your verification.', ephemeral: true }).catch(() => {});
+        }
     }
 });
 
