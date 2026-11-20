@@ -1,6 +1,4 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes } = require('discord.js');
-const Tesseract = require('tesseract.js');
-const Jimp = require('jimp');
 const http = require('http');
 
 const client = new Client({
@@ -9,23 +7,9 @@ const client = new Client({
 
 const claimedCharacters = new Map();
 
-// Improved image preprocessing for game fonts
-async function preprocessFullImage(imageUrl) {
-    try {
-        const image = await Jimp.read(imageUrl);
-        image.scale(2)
-             .greyscale()
-             .normalize()
-             .contrast(0.4);
-        return await image.getBufferAsync(Jimp.MIME_PNG);
-    } catch (error) {
-        console.error('Image processing error:', error);
-        return null;
-    }
-}
-
 // Maps MapleStory jobs/advancements to exact Discord role names
 function detectJobRoleName(text) {
+    if (!text) return null;
     const lower = text.toLowerCase();
 
     if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
@@ -66,16 +50,31 @@ async function getClassicRankData(characterName) {
     }
 }
 
-// 2. Read job from screenshot OCR
+// 2. Cloud OCR via OCR.space (Uses 0 MB local RAM)
 async function verifyScreenshotJob(imageUrl) {
     try {
-        const processedBuffer = await preprocessFullImage(imageUrl);
-        if (!processedBuffer) return null;
+        const apiKey = process.env.OCR_API_KEY || 'helloworld';
+        const params = new URLSearchParams({
+            apikey: apiKey,
+            url: imageUrl,
+            language: 'eng',
+            isOverlayRequired: 'false',
+            scale: 'true',
+            OCREngine: '2' // Engine 2 is optimized for stylized/game fonts
+        });
 
-        const { data: { text } } = await Tesseract.recognize(processedBuffer, 'eng');
-        return detectJobRoleName(text);
+        const response = await fetch(`https://api.ocr.space/parse/imageurl?${params.toString()}`);
+        const data = await response.json();
+
+        if (data.IsErroredOnProcessing || !data.ParsedResults?.[0]) {
+            console.error('OCR.space API Error:', data.ErrorMessage || data);
+            return null;
+        }
+
+        const parsedText = data.ParsedResults[0].ParsedText;
+        return detectJobRoleName(parsedText);
     } catch (error) {
-        console.error('OCR Error:', error);
+        console.error('OCR Fetch Error:', error);
         return null;
     }
 }
@@ -111,59 +110,62 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand() || interaction.commandName !== 'verify') return;
 
-    await interaction.deferReply({ ephemeral: true });
-
-    const member = interaction.member;
-
-    // Check if the user already has a job role assigned
-    const jobRoleNames = ['cleric', 'mage', 'warrior', 'bowman', 'rogue'];
-    const alreadyHasJob = member.roles.cache.some(r => jobRoleNames.includes(r.name.toLowerCase()));
-
-    if (alreadyHasJob) {
-        return interaction.editReply('❌ You are already verified and already possess a class role!');
+    try {
+        await interaction.deferReply({ ephemeral: true });
+    } catch (err) {
+        console.error('Defer Reply Timeout:', err);
+        return;
     }
-
-    const rawIgn = interaction.options.getString('character').trim();
-    const ignKey = rawIgn.toLowerCase();
-    const attachment = interaction.options.getAttachment('screenshot');
-
-    if (!/^[a-zA-Z0-9]{4,12}$/.test(rawIgn)) {
-        return interaction.editReply('❌ Invalid IGN. MapleStory names must be 4–12 letters or numbers with no spaces.');
-    }
-
-    if (claimedCharacters.has(ignKey) && claimedCharacters.get(ignKey) !== interaction.user.id) {
-        return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
-    }
-
-    // 1. Check ClassicRank profile & job
-    const trackerData = await getClassicRankData(rawIgn);
-    if (!trackerData.exists) {
-        return interaction.editReply(
-            `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
-            `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
-        );
-    }
-
-    if (!attachment.contentType || !attachment.contentType.startsWith('image/')) {
-        return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
-    }
-
-    // 2. Read job from screenshot via OCR
-    const screenshotJob = await verifyScreenshotJob(attachment.url);
-
-    // 3. Strict Anti-Spoofing: If the screenshot contains a detectable job and it doesn't match ClassicRank, block it
-    if (trackerData.jobRole && screenshotJob && trackerData.jobRole.toLowerCase() !== screenshotJob.toLowerCase()) {
-        return interaction.editReply(
-            `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
-            `but your screenshot shows **${screenshotJob}**.\n` +
-            `*Please upload a screenshot matching your character's actual class.*`
-        );
-    }
-
-    // Use ClassicRank's verified job class
-    const detectedRoleName = trackerData.jobRole;
 
     try {
+        const member = interaction.member;
+
+        // Block if user already has a class role
+        const jobRoleNames = ['cleric', 'mage', 'warrior', 'bowman', 'rogue'];
+        const alreadyHasJob = member.roles.cache.some(r => jobRoleNames.includes(r.name.toLowerCase()));
+
+        if (alreadyHasJob) {
+            return interaction.editReply('❌ You are already verified and already possess a class role!');
+        }
+
+        const rawIgn = interaction.options.getString('character').trim();
+        const ignKey = rawIgn.toLowerCase();
+        const attachment = interaction.options.getAttachment('screenshot');
+
+        if (!/^[a-zA-Z0-9]{4,12}$/.test(rawIgn)) {
+            return interaction.editReply('❌ Invalid IGN. MapleStory names must be 4–12 letters or numbers with no spaces.');
+        }
+
+        if (claimedCharacters.has(ignKey) && claimedCharacters.get(ignKey) !== interaction.user.id) {
+            return interaction.editReply(`❌ **${rawIgn}** has already been verified by another member in this server.`);
+        }
+
+        // 1. Check ClassicRank profile & job
+        const trackerData = await getClassicRankData(rawIgn);
+        if (!trackerData.exists) {
+            return interaction.editReply(
+                `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
+                `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
+            );
+        }
+
+        if (!attachment.contentType || !attachment.contentType.startsWith('image/')) {
+            return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
+        }
+
+        // 2. Read job from screenshot via Cloud OCR
+        const screenshotJob = await verifyScreenshotJob(attachment.url);
+
+        // 3. Strict Anti-Spoofing
+        if (trackerData.jobRole && screenshotJob && trackerData.jobRole.toLowerCase() !== screenshotJob.toLowerCase()) {
+            return interaction.editReply(
+                `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
+                `but your screenshot shows **${screenshotJob}**.\n` +
+                `*Please upload a screenshot matching your character's actual class.*`
+            );
+        }
+
+        const detectedRoleName = trackerData.jobRole || screenshotJob;
         const guild = interaction.guild;
 
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
@@ -193,13 +195,15 @@ client.on('interactionCreate', async interaction => {
             .setColor(0x00FF00);
 
         await interaction.editReply({ embeds: [embed] });
+
     } catch (error) {
-        console.error('Permission/Hierarchy Error:', error);
-        await interaction.editReply('❌ Verification passed, but I lacked permission to set your nickname or role. Make sure the bot\'s role is dragged **above** Cleric, Warrior, Mage, Bowman, and Rogue in Server Settings.');
+        console.error('Interaction Execution Error:', error);
+        await interaction.editReply('❌ An unexpected error occurred while processing your verification.').catch(() => {});
     }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.on('error', err => console.error('Discord Client Error:', err));
+client.login(process.env.DISCORD_TOKEN).catch(err => console.error('❌ Login Failed:', err));
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
