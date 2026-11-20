@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes, MessageFlags } = require('discord.js');
 const http = require('http');
 
 const client = new Client({
@@ -35,15 +35,17 @@ function detectJobRoleName(text) {
 // 1. Fetch ClassicRank page and target strictly the CHARACTER INFO profile card
 async function getClassicRankData(characterName) {
     try {
-        const response = await fetchWithTimeout(
-            `https://classicrank.com/user/${encodeURIComponent(characterName)}`,
-            {},
-            8000
-        );
-        if (response.status === 404 || !response.ok) return { exists: false, jobRole: null };
-
+        const url = `https://classicrank.com/user/${encodeURIComponent(characterName)}`;
+        const response = await fetchWithTimeout(url, {}, 8000);
         const html = await response.text();
+
+        if (!response.ok || response.status === 404) {
+            console.warn(`ClassicRank non-OK (${response.status}) for ${characterName}:`, html.slice(0, 250));
+            return { exists: false, jobRole: null };
+        }
+
         if (html.toLowerCase().includes('character not found')) {
+            console.warn(`ClassicRank reported character not found for ${characterName}`);
             return { exists: false, jobRole: null };
         }
 
@@ -98,7 +100,7 @@ async function verifyScreenshotJob(imageUrl) {
     }
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`✅ Bot Logged in as ${client.user.tag}!`);
 
     const command = new SlashCommandBuilder()
@@ -130,7 +132,7 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand() || interaction.commandName !== 'verify') return;
 
     try {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     } catch (err) {
         console.error('Defer Reply Timeout:', err);
         return;
