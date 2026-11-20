@@ -7,6 +7,17 @@ const client = new Client({
 
 const claimedCharacters = new Map();
 
+// Helper to prevent hanging requests on slow external APIs
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Maps MapleStory jobs/advancements to exact Discord role names
 function detectJobRoleName(text) {
     if (!text) return null;
@@ -24,7 +35,11 @@ function detectJobRoleName(text) {
 // 1. Fetch ClassicRank page and target strictly the CHARACTER INFO profile card
 async function getClassicRankData(characterName) {
     try {
-        const response = await fetch(`https://classicrank.com/user/${encodeURIComponent(characterName)}`);
+        const response = await fetchWithTimeout(
+            `https://classicrank.com/user/${encodeURIComponent(characterName)}`,
+            {},
+            8000
+        );
         if (response.status === 404 || !response.ok) return { exists: false, jobRole: null };
 
         const html = await response.text();
@@ -60,10 +75,14 @@ async function verifyScreenshotJob(imageUrl) {
             language: 'eng',
             isOverlayRequired: 'false',
             scale: 'true',
-            OCREngine: '2' // Engine 2 is optimized for stylized/game fonts
+            OCREngine: '2'
         });
 
-        const response = await fetch(`https://api.ocr.space/parse/imageurl?${params.toString()}`);
+        const response = await fetchWithTimeout(
+            `https://api.ocr.space/parse/imageurl?${params.toString()}`,
+            {},
+            10000
+        );
         const data = await response.json();
 
         if (data.IsErroredOnProcessing || !data.ParsedResults?.[0]) {
@@ -141,6 +160,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         // 1. Check ClassicRank profile & job
+        console.log(`1. Checking ClassicRank for ${rawIgn}`);
         const trackerData = await getClassicRankData(rawIgn);
         if (!trackerData.exists) {
             return interaction.editReply(
@@ -154,6 +174,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         // 2. Read job from screenshot via Cloud OCR
+        console.log(`2. Running OCR on ${attachment.url}`);
         const screenshotJob = await verifyScreenshotJob(attachment.url);
 
         // 3. Strict Anti-Spoofing
@@ -168,6 +189,7 @@ client.on('interactionCreate', async interaction => {
         const detectedRoleName = trackerData.jobRole || screenshotJob;
         const guild = interaction.guild;
 
+        console.log(`3. Assigning roles/nickname for ${rawIgn} (Role: ${detectedRoleName || 'None'})`);
         await member.setNickname(rawIgn, 'Verified MapleStory Classic IGN');
 
         if (process.env.VERIFIED_ROLE_ID) {
