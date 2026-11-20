@@ -1,6 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes } = require('discord.js');
-const Tesseract = require('tesseract.js');
-const Jimp = require('jimp');
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, REST, Routes, MessageFlags } = require('discord.js');
 const http = require('http');
 
 const client = new Client({
@@ -20,23 +18,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
     }
 }
 
-// Improved image preprocessing for game fonts
-async function preprocessFullImage(imageUrl) {
-    try {
-        const image = await Jimp.read(imageUrl);
-        image.scale(2)
-             .greyscale()
-             .normalize()
-             .contrast(0.4);
-        return await image.getBufferAsync(Jimp.MIME_PNG);
-    } catch (error) {
-        console.error('Image processing error:', error);
-        return null;
-    }
-}
-
 // Maps MapleStory jobs/advancements to exact Discord role names
 function detectJobRoleName(text) {
+    if (!text) return null;
     const lower = text.toLowerCase();
 
     if (/\b(cleric|priest|bishop)\b/.test(lower)) return 'Cleric';
@@ -48,54 +32,119 @@ function detectJobRoleName(text) {
     return null;
 }
 
-// 1. Fetch ClassicRank page and target strictly the CHARACTER INFO profile card
+// 1. Fetch ClassicRank page across Windia/Zenith routes and extract job class
 async function getClassicRankData(characterName) {
+    const exact = encodeURIComponent(characterName);
+    const lower = encodeURIComponent(characterName.toLowerCase());
+
+    const candidateUrls = [
+        `https://classicrank.com/user/windia/${exact}`,
+        `https://classicrank.com/user/windia/${lower}`,
+        `https://classicrank.com/user/zenith/${exact}`,
+        `https://classicrank.com/user/${exact}`
+    ];
+
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/json'
+    };
+
     try {
-        const response = await fetchWithTimeout(
-            `https://classicrank.com/user/${encodeURIComponent(characterName)}`,
-            {},
-            8000
-        );
-        if (response.status === 404 || !response.ok) return { exists: false, jobRole: null };
+        let lastStatus = null;
+        let lastUrl = '';
+        let lastSnippet = '';
 
-        const html = await response.text();
-        if (html.toLowerCase().includes('character not found')) {
-            return { exists: false, jobRole: null };
+        for (const url of candidateUrls) {
+            const response = await fetchWithTimeout(url, { headers, redirect: 'follow' }, 8000);
+            const html = await response.text();
+            lastStatus = response.status;
+            lastUrl = response.url || url;
+            lastSnippet = html.replace(/\s+/g, ' ').slice(0, 300);
+
+            if (!response.ok || response.status === 404) {
+                continue;
+            }
+
+            const lowerHtml = html.toLowerCase();
+            if (lowerHtml.includes('character not found') || lowerHtml.includes('user not found')) {
+                continue;
+            }
+
+            // Confirm the character's name actually appears in the response
+            if (!lowerHtml.includes(characterName.toLowerCase())) {
+                continue;
+            }
+
+            // 1) Try CHARACTER INFO section if server-rendered
+            const charInfoIdx = html.toUpperCase().indexOf('CHARACTER INFO');
+            if (charInfoIdx !== -1) {
+                const profileHtml = html.substring(charInfoIdx, charInfoIdx + 1500);
+                const cleanProfile = profileHtml.replace(/<[^>]*>/g, ' ');
+                const jobRole = detectJobRoleName(cleanProfile);
+                if (jobRole) return { exists: true, jobRole, profileUrl: lastUrl };
+            }
+
+            // 2) Try Next.js / embedded JSON payload around the character's name
+            const nameIdx = lowerHtml.indexOf(characterName.toLowerCase());
+            if (nameIdx !== -1) {
+                const start = Math.max(0, nameIdx - 400);
+                const windowText = html.substring(start, nameIdx + 800).replace(/<[^>]*>/g, ' ');
+                const jobRole = detectJobRoleName(windowText);
+                if (jobRole) return { exists: true, jobRole, profileUrl: lastUrl };
+            }
+
+            // 3) Fallback: strip scripts/styles so navbar links don't false-match, then scan visible text
+            const visibleText = html
+                .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                .replace(/<[^>]*>/g, ' ');
+            const jobRole = detectJobRoleName(visibleText);
+
+            return { exists: true, jobRole, profileUrl: lastUrl };
         }
 
-        const charInfoIdx = html.indexOf('CHARACTER INFO');
-        if (charInfoIdx !== -1) {
-            const profileHtml = html.substring(charInfoIdx, charInfoIdx + 1200);
-            const cleanProfile = profileHtml.replace(/<[^>]*>/g, ' ');
-            const jobRole = detectJobRoleName(cleanProfile);
-            if (jobRole) return { exists: true, jobRole };
-        }
-
-        const cleanText = html.replace(/<[^>]*>/g, ' ');
-        const jobRole = detectJobRoleName(cleanText);
-
-        return { exists: true, jobRole };
+        console.warn(`ClassicRank miss for ${characterName} (lastUrl: ${lastUrl}, status: ${lastStatus}):`, lastSnippet);
+        return { exists: false, jobRole: null };
     } catch (error) {
         console.error('ClassicRank Lookup Error:', error);
         return { exists: true, jobRole: null };
     }
 }
 
-// 2. Read job from screenshot OCR
+// 2. Cloud OCR via OCR.space (Uses 0 MB local RAM)
 async function verifyScreenshotJob(imageUrl) {
     try {
-        const processedBuffer = await preprocessFullImage(imageUrl);
-        if (!processedBuffer) return null;
+        const apiKey = process.env.OCR_API_KEY || 'helloworld';
+        const params = new URLSearchParams({
+            apikey: apiKey,
+            url: imageUrl,
+            language: 'eng',
+            isOverlayRequired: 'false',
+            scale: 'true',
+            OCREngine: '2'
+        });
 
-        const { data: { text } } = await Tesseract.recognize(processedBuffer, 'eng');
-        return detectJobRoleName(text);
+        const response = await fetchWithTimeout(
+            `https://api.ocr.space/parse/imageurl?${params.toString()}`,
+            {},
+            10000
+        );
+        const data = await response.json();
+
+        if (data.IsErroredOnProcessing || !data.ParsedResults?.[0]) {
+            console.error('OCR.space API Error:', data.ErrorMessage || data);
+            return null;
+        }
+
+        const parsedText = data.ParsedResults[0].ParsedText;
+        return detectJobRoleName(parsedText);
     } catch (error) {
-        console.error('OCR Error:', error);
+        console.error('OCR Fetch Error:', error);
         return null;
     }
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`✅ Bot Logged in as ${client.user.tag}!`);
 
     const command = new SlashCommandBuilder()
@@ -127,7 +176,7 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand() || interaction.commandName !== 'verify') return;
 
     try {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     } catch (err) {
         console.error('Defer Reply Timeout:', err);
         return;
@@ -136,7 +185,7 @@ client.on('interactionCreate', async interaction => {
     try {
         const member = interaction.member;
 
-        // Check if the user already has a job role assigned
+        // Block if user already has a class role
         const jobRoleNames = ['cleric', 'mage', 'warrior', 'bowman', 'rogue'];
         const alreadyHasJob = member.roles.cache.some(r => jobRoleNames.includes(r.name.toLowerCase()));
 
@@ -161,7 +210,7 @@ client.on('interactionCreate', async interaction => {
         const trackerData = await getClassicRankData(rawIgn);
         if (!trackerData.exists) {
             return interaction.editReply(
-                `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/${rawIgn}\`).\n` +
+                `❌ Could not find **${rawIgn}** on ClassicRank (\`classicrank.com/user/windia/${rawIgn}\`).\n` +
                 `*Make sure your character has been scanned or uploaded to ClassicRank first!*`
             );
         }
@@ -170,11 +219,11 @@ client.on('interactionCreate', async interaction => {
             return interaction.editReply('❌ Please upload a valid image file (PNG or JPEG).');
         }
 
-        // 2. Read job from screenshot via OCR
+        // 2. Read job from screenshot via Cloud OCR
         console.log(`2. Running OCR on ${attachment.url}`);
         const screenshotJob = await verifyScreenshotJob(attachment.url);
 
-        // 3. Strict Anti-Spoofing: If the screenshot contains a detectable job and it doesn't match ClassicRank, block it
+        // 3. Strict Anti-Spoofing
         if (trackerData.jobRole && screenshotJob && trackerData.jobRole.toLowerCase() !== screenshotJob.toLowerCase()) {
             return interaction.editReply(
                 `❌ **Class Mismatch:** ClassicRank lists **${rawIgn}** as **${trackerData.jobRole}**, ` +
@@ -183,7 +232,6 @@ client.on('interactionCreate', async interaction => {
             );
         }
 
-        // Use ClassicRank's verified job class
         const detectedRoleName = trackerData.jobRole || screenshotJob;
         const guild = interaction.guild;
 
